@@ -27,26 +27,38 @@ Do not worry about the 4GB file limit of FAT32. This tool features **Automatic W
 ### Permissions
 - Direct disk access requires specific macOS permissions. Always follow the prompts within the app log.
 
-## 🛠 Installation (Development)
+## 🛠 How to Compile (Building from Source)
 
-1.  Ensure you have Rust installed: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-2.  Clone the repository:
-    ```bash
-    git clone git@github.com:vladislavmaiocchi/Rufus-rs-for-Mac.git
-    cd Rufus-rs-for-Mac
-    ```
-3.  Build the project:
-    ```bash
-    cargo build --release
-    ```
+If you want to build the project yourself, follow these steps:
 
-## 📦 Creating a Bundle (DMG)
+### 1. Prerequisites
+- **Rust & Cargo:** Install via [rustup.rs](https://rustup.rs/):
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- **Xcode Command Line Tools:**
+  ```bash
+  xcode-select --install
+  ```
 
-To create a macOS `.app` bundle and a `.dmg` installer:
+### 2. Compilation
+To build the graphical version (GUI):
 ```bash
-cargo bundle --release --bin rufus-rs-gui
+cargo build --release --bin rufus-rs-gui
 ```
-The output will be in `target/release/bundle/dmg/`.
+The executable will be located at `target/release/rufus-rs-gui`.
+
+### 3. Creating the macOS App (.app) and DMG
+We use `cargo-bundle` to create the native macOS application:
+1. Install the bundler: `cargo install cargo-bundle`
+2. Run the bundle command:
+   ```bash
+   cargo bundle --release --bin rufus-rs-gui
+   ```
+3. Your **DMG** and **.app** will be in `target/release/bundle/`.
+
+## 📦 Releases
+You can find the pre-compiled **DMG** in the [Releases](https://github.com/vladislavmaiocchi/Rufus-rs-for-Mac/releases) section of this repository.
 
 ## 📜 License
 
