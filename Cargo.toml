@@ -1,0 +1,32 @@
+[package]
+name = "rufus-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+eframe = "0.33"
+plist = "1.7"
+rfd = "0.15"
+tempfile = "3.15"
+walkdir = "2.5"
+wimlib = { version = "0.3", features = ["bundled"], default-features = false }
+
+[package.metadata.bundle]
+name = "rufus-rs"
+identifier = "com.vladik.rufus-rs"
+icon = ["assets/icon.icns"]
+version = "0.1.0"
+resources = []
+copyright = "Copyright © 2026 Vladik"
+category = "Utility"
+short_description = "Rufus-like tool for Windows USB creation on macOS"
+long_description = """
+A Rufus-like utility for creating bootable Windows USB drives on macOS.
+Supports FAT32 with automatic WIM splitting.
+"""
+
+[package.metadata.bundle.bin.rufus-rs-gui]
+icon = ["assets/icon.icns"]
+identifier = "com.vladik.rufus-rs-gui"
