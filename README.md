@@ -10,12 +10,19 @@ A Rufus-inspired utility for creating bootable Windows USB drives on macOS. This
 - **Disk Safety:** Filters out internal disks to prevent accidental data loss.
 - **Dry-run Mode:** Preview the actions before they are executed.
 
-## ⚠️ Current Status & Known Issues
+## ⚠️ CRITICAL: NTFS Status & Recommended Workaround
 
-### NTFS Formatting
-- **Issue:** macOS aggressively locks raw disks, which can cause `mkntfs` to fail with a "Read-only file system" error.
-- **Solution:** The app includes a button to open **System Settings > Privacy & Security > Full Disk Access**. You must grant this permission to the app and restart it to enable NTFS formatting.
-- **Recommendation:** Use **FAT32** for maximum reliability. The tool's WIM-splitting feature makes FAT32 perfectly capable of handling large Windows ISOs.
+**NTFS formatting is currently UNSTABLE on macOS.**
+
+Due to macOS System Integrity Protection (SIP) and aggressive disk locking by the kernel, `mkntfs` often fails with a **"Read-only file system"** error, even when the app has Full Disk Access. We have implemented several workarounds (header clearing, forced unmounts), but success is not guaranteed.
+
+### ✅ The Recommended Way: Use FAT32
+Do not worry about the 4GB file limit of FAT32. This tool features **Automatic WIM Splitting**:
+1. Select **FAT32 (Standard)** in the app.
+2. The tool will automatically detect if `install.wim` is too large.
+3. It will split it into `.swm` chunks that fit on FAT32.
+4. Windows Installer recognizes these chunks perfectly.
+5. This method is **100% reliable** on macOS and results in a more compatible UEFI bootable drive.
 
 ### Permissions
 - Direct disk access requires specific macOS permissions. Always follow the prompts within the app log.

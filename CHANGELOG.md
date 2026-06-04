@@ -14,7 +14,9 @@ All notable changes to this project will be documented in this file.
 - **Robust Disk Management**: Implemented aggressive unmounting and partition header clearing (using `dd`) to combat macOS auto-mounting issues.
 - **GitHub Repository**: Initialized the project on GitHub with comprehensive documentation.
 
-### Fixed
-- Fixed "Read-only file system" error during NTFS formatting by targeting the correct data partition and ensuring the whole physical disk is unmounted.
-- Fixed an issue where the first partition (EFI) was incorrectly selected for formatting.
-- Resolved various macOS-specific disk locking conflicts during the formatting pipeline.
+### Improved (Work in Progress)
+- **NTFS Formatting Robustness**: Implemented multiple strategies to fix "Read-only file system" errors, including whole-disk unmounting, partition header clearing with `dd`, and use of raw device paths. However, **NTFS formatting may still fail** on some systems due to macOS SIP/Kernel locks.
+- **Partition Selection**: Improved logic to identify the correct data partition and avoid system EFI partitions.
+
+### Known Issues
+- **NTFS "Read-only file system"**: Despite aggressive unmounting attempts, macOS may still lock the raw disk device, preventing `mkntfs` from working. This is a known limitation of direct disk access on modern macOS.
