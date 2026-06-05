@@ -13,6 +13,7 @@ use rufus_rs::{iso, validation};
 
 enum JobMessage {
     Log(String),
+    Progress(f32),
     Finished(Result<String, String>),
 }
 
@@ -25,6 +26,7 @@ struct RufusGuiApp {
     selected_disk: Option<String>,
     acknowledge_erase: bool,
     busy: bool,
+    progress: f32,
     receiver: Option<Receiver<JobMessage>>,
     output_log: String,
 }
@@ -40,6 +42,7 @@ impl Default for RufusGuiApp {
             selected_disk: None,
             acknowledge_erase: false,
             busy: false,
+            progress: 0.0,
             receiver: None,
             output_log: String::new(),
         };
@@ -130,6 +133,7 @@ impl RufusGuiApp {
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
         self.busy = true;
+        self.progress = 0.0;
         self.append_log(if execute {
             "Starting USB creation..."
         } else {
@@ -161,10 +165,14 @@ impl RufusGuiApp {
         for message in messages {
             match message {
                 JobMessage::Log(line) => self.append_log(line),
+                JobMessage::Progress(p) => self.progress = p,
                 JobMessage::Finished(result) => {
                     finished = true;
                     match result {
-                        Ok(done) => self.append_log(done),
+                        Ok(done) => {
+                            self.append_log(done);
+                            self.progress = 1.0;
+                        }
                         Err(error) => {
                             self.append_log(format!("Operation failed: {error:#}"));
                             let err_str = error.to_string();
@@ -265,7 +273,7 @@ impl eframe::App for RufusGuiApp {
                 ui.text_edit_singleline(&mut self.label);
 
                 ui.label("Filesystem:");
-                egui::ComboBox::from_id_source("fs_combo")
+                egui::ComboBox::from_id_salt("fs_combo")
                     .selected_text(self.fs.to_string())
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.fs, FileSystem::Fat32, "FAT32 (Standard)");
@@ -315,6 +323,11 @@ impl eframe::App for RufusGuiApp {
                     self.start_job(true);
                 }
             });
+
+            if self.busy || self.progress > 0.0 {
+                ui.add_space(8.0);
+                ui.add(egui::ProgressBar::new(self.progress).show_percentage());
+            }
 
             if self.output_log.contains("FULL DISK ACCESS") {
                 ui.add_space(8.0);
@@ -379,7 +392,9 @@ fn run_create_usb_job(
     let _ = sender.send(JobMessage::Log(
         "Executing disk partition + file copy pipeline...".to_string(),
     ));
-    pipeline::execute_create_usb(&options, &inspection)
+    pipeline::execute_create_usb(&options, &inspection, |p| {
+        let _ = sender.send(JobMessage::Progress(p));
+    })
 }
 
 fn main() -> eframe::Result {

@@ -6,17 +6,37 @@ use anyhow::{Context, Result};
 use walkdir::WalkDir;
 use wimlib::{OpenFlags, WimLib, WriteFlags};
 
-pub fn copy_iso_to_usb(
+pub fn copy_iso_to_usb<F>(
     source_mount: &Path,
     target_mount: &Path,
     split_install_wim: bool,
     max_split_size_mb: u32,
-) -> Result<()> {
+    mut progress: F,
+) -> Result<()> 
+where F: FnMut(f32) {
     let source_install_wim = source_mount.join("sources").join("install.wim");
     let target_sources_dir = target_mount.join("sources");
 
+    // Calculate total size for progress reporting
+    let mut total_size = 0u64;
+    let mut entries = Vec::new();
     for entry in WalkDir::new(source_mount) {
-        let entry = entry.context("Directory traversal failed during copy")?;
+        let entry = entry.context("Directory traversal failed during size calculation")?;
+        if entry.file_type().is_file() {
+            if split_install_wim && entry.path() == source_install_wim {
+                // We'll handle WIM separately as it takes a lot of time
+                continue;
+            }
+            total_size += entry.metadata()?.len();
+        }
+        entries.push(entry);
+    }
+
+    let mut copied_size = 0u64;
+    let wim_weight = 0.5; // Give WIM splitting 50% of the progress if it happens
+    let file_weight = if split_install_wim { 1.0 - wim_weight } else { 1.0 };
+
+    for entry in entries {
         let source_path = entry.path();
         let relative = source_path
             .strip_prefix(source_mount)
@@ -47,6 +67,7 @@ pub fn copy_iso_to_usb(
             })?;
         }
 
+        let file_size = entry.metadata()?.len();
         fs::copy(source_path, &destination_path).with_context(|| {
             format!(
                 "Unable to copy {} to {}",
@@ -54,6 +75,11 @@ pub fn copy_iso_to_usb(
                 destination_path.display()
             )
         })?;
+        
+        copied_size += file_size;
+        if total_size > 0 {
+            progress((copied_size as f32 / total_size as f32) * file_weight);
+        }
     }
 
     if split_install_wim {
@@ -63,11 +89,15 @@ pub fn copy_iso_to_usb(
                 target_sources_dir.display()
             )
         })?;
+        
+        // Progress for WIM starts at file_weight
+        progress(file_weight);
         split_wim(
             &source_install_wim,
             &target_sources_dir.join("install.swm"),
             max_split_size_mb,
         )?;
+        progress(1.0);
     }
 
     Ok(())

@@ -130,7 +130,12 @@ fn create_usb_command(args: CreateUsbArgs) -> Result<()> {
         bail!("Missing --yes-erase-disk flag");
     }
 
-    pipeline::execute_create_usb(&options, &inspection)?;
+    pipeline::execute_create_usb(&options, &inspection, |p| {
+        print!("\rProgress: {:.1}%", p * 100.0);
+        use std::io::{stdout, Write};
+        let _ = stdout().flush();
+    })?;
+    println!();
     Ok(())
 }
 

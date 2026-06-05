@@ -85,9 +85,11 @@ pub fn build_plan(
     CreateUsbPlan { steps }
 }
 
-pub fn execute_create_usb(options: &CreateUsbOptions, inspection: &IsoInspection) -> Result<()> {
+pub fn execute_create_usb<F>(options: &CreateUsbOptions, inspection: &IsoInspection, mut progress: F) -> Result<()> 
+where F: FnMut(f32) {
     let device_node = format!("/dev/{}", options.disk_identifier);
     
+    progress(0.05);
     // Aggressively unmount the disk multiple times if needed, with a small delay.
     // This helps against macOS auto-mounting or processes holding onto the disk.
     for i in 1..=3 {
@@ -100,6 +102,7 @@ pub fn execute_create_usb(options: &CreateUsbOptions, inspection: &IsoInspection
         if i == 3 { break; }
     }
 
+    progress(0.1);
     // Use eraseDisk instead of partitionDisk as it is often more reliable for this task.
     // Format: diskutil eraseDisk <format> <name> <partmap> <device>
     let (fs_str, is_ntfs) = match options.fs {
@@ -119,6 +122,7 @@ pub fn execute_create_usb(options: &CreateUsbOptions, inspection: &IsoInspection
     run_command(&mut erase_cmd, "partition and format target disk (eraseDisk)")
         .context("Failed to partition the USB disk. Ensure no other applications (like Finder or Terminal) are using it.")?;
 
+    progress(0.2);
     if is_ntfs {
         println!("Applying NTFS filesystem...");
         let tools = crate::ntfs::NtfsTools::new()?;
@@ -147,10 +151,10 @@ let part_id = target_part.or_else(|| partitions.get(1).cloned()).ok_or_else(|| {
 })?;
 
 let part_node = format!("/dev/r{}", part_id);
-let block_node = format!("/dev/{}", part_id);
+let _block_node = format!("/dev/{}", part_id);
 
 // macOS is very aggressive with auto-mounting. We unmount multiple times.
-for i in 1..=3 {
+for _i in 1..=3 {
     let _ = Command::new("diskutil")
         .arg("unmountDisk")
         .arg("force")
@@ -184,25 +188,32 @@ tools.format(&part_node, &options.label)
     .context("Failed to format partition as NTFS. macOS is still locking the device. Try giving 'Full Disk Access' to the app, or use FAT32 (which supports large ISOs via splitting).")?;
 }
 
+    progress(0.3);
     let target_mount = wait_for_partition_mount(&options.disk_identifier, &options.label, Duration::from_secs(45))
         .context("Timed out waiting for target partition to mount after formatting")?;
 
+    progress(0.35);
     let mut mounted_iso =
         MountedIso::attach(&options.iso_path).context("Unable to attach ISO for copy phase")?;
 
     let needs_split = options.fs == FileSystem::Fat32 && inspection.needs_wim_split;
 
+    let p_start = 0.4;
+    let p_end = 0.95;
     copy::copy_iso_to_usb(
         mounted_iso.mount_point(),
         &target_mount,
         needs_split,
         options.max_split_size_mb,
+        |p| progress(p_start + p * (p_end - p_start)),
     )?;
 
+    progress(0.96);
     mounted_iso.detach()?;
     let mut sync_command = Command::new("sync");
     run_command(&mut sync_command, "sync filesystem buffers")?;
 
+    progress(1.0);
     println!("USB creation completed successfully.");
     println!("Target mount path: {}", target_mount.display());
     Ok(())
