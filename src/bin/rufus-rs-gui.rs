@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use eframe::egui::{self, Color32};
 use rfd::FileDialog;
 use rufus_rs::disk::{self, DiskInfo};
+use rufus_rs::i18n::Language;
 use rufus_rs::pipeline::{self, CreateUsbOptions, FileSystem};
 use rufus_rs::{iso, validation};
 
@@ -29,6 +30,7 @@ struct RufusGuiApp {
     progress: f32,
     receiver: Option<Receiver<JobMessage>>,
     output_log: String,
+    lang: Language,
 }
 
 impl Default for RufusGuiApp {
@@ -45,6 +47,7 @@ impl Default for RufusGuiApp {
             progress: 0.0,
             receiver: None,
             output_log: String::new(),
+            lang: Language::English,
         };
         app.refresh_disks();
         app
@@ -60,6 +63,7 @@ impl RufusGuiApp {
     }
 
     fn refresh_disks(&mut self) {
+        let t = self.lang.translations();
         match disk::list_disks() {
             Ok(disks) => {
                 self.disks = disks;
@@ -68,10 +72,10 @@ impl RufusGuiApp {
                         self.selected_disk = None;
                     }
                 }
-                self.append_log("Disk list refreshed.");
+                self.append_log(t.refresh_disks);
             }
             Err(error) => {
-                self.append_log(format!("Unable to refresh disk list: {error:#}"));
+                self.append_log(format!("{}: {error:#}", t.operation_failed.replace(": {}", "")));
             }
         }
     }
@@ -81,14 +85,16 @@ impl RufusGuiApp {
             return;
         }
 
+        let t = self.lang.translations();
+
         let Some(disk_identifier) = self.selected_disk.clone() else {
-            self.append_log("Select a target disk first.");
+            self.append_log(t.select_disk_error);
             return;
         };
 
         let iso_input = self.iso_path.trim();
         if iso_input.is_empty() {
-            self.append_log("Select a Windows ISO first.");
+            self.append_log(t.select_iso_error);
             return;
         }
 
@@ -104,7 +110,7 @@ impl RufusGuiApp {
         let max_split_size_mb = match self.max_split_size_mb.trim().parse::<u32>() {
             Ok(value) if value >= 512 => value,
             _ => {
-                self.append_log("max_split_size_mb must be a number >= 512.");
+                self.append_log(t.max_split_error);
                 return;
             }
         };
@@ -112,13 +118,13 @@ impl RufusGuiApp {
         let label = match validation::normalize_volume_label(&self.label) {
             Ok(value) => value,
             Err(error) => {
-                self.append_log(format!("Invalid volume label: {error:#}"));
+                self.append_log(t.invalid_label_error.replace("{}", &format!("{error:#}")));
                 return;
             }
         };
 
         if execute && !self.acknowledge_erase {
-            self.append_log("Check the erase confirmation before executing.");
+            self.append_log(t.acknowledge_error);
             return;
         }
 
@@ -128,6 +134,7 @@ impl RufusGuiApp {
             label,
             fs: self.fs,
             max_split_size_mb,
+            lang: self.lang,
         };
 
         let (sender, receiver) = mpsc::channel();
@@ -135,18 +142,20 @@ impl RufusGuiApp {
         self.busy = true;
         self.progress = 0.0;
         self.append_log(if execute {
-            "Starting USB creation..."
+            t.start_usb_creation
         } else {
-            "Starting dry-run..."
+            t.start_dry_run
         });
 
+        let lang_for_thread = self.lang;
         thread::spawn(move || {
+            let t = lang_for_thread.translations();
             let result = run_create_usb_job(options, execute, &sender);
             let completion = result.map(|_| {
                 if execute {
-                    "USB creation finished successfully.".to_string()
+                    t.success_usb.to_string()
                 } else {
-                    "Dry-run completed successfully.".to_string()
+                    t.success_dry_run.to_string()
                 }
             });
             let _ = sender.send(JobMessage::Finished(completion.map_err(|e| format!("{e:#}"))));
@@ -154,6 +163,7 @@ impl RufusGuiApp {
     }
 
     fn poll_worker_messages(&mut self) {
+        let t = self.lang.translations();
         let mut messages = Vec::new();
         if let Some(receiver) = self.receiver.as_ref() {
             while let Ok(message) = receiver.try_recv() {
@@ -174,14 +184,14 @@ impl RufusGuiApp {
                             self.progress = 1.0;
                         }
                         Err(error) => {
-                            self.append_log(format!("Operation failed: {error:#}"));
+                            self.append_log(t.operation_failed.replace("{}", &format!("{error:#}")));
                             let err_str = error.to_string();
                             if err_str.contains("Permission denied") || err_str.contains("Read-only file system") {
-                                self.append_log("\n--- [!] ACTION REQUIRED: FULL DISK ACCESS ---");
-                                self.append_log("macOS is blocking direct disk access for NTFS formatting.");
-                                self.append_log("Please grant 'Full Disk Access' to this app in:");
-                                self.append_log("System Settings > Privacy & Security > Full Disk Access");
-                                self.append_log("Click 'Open System Settings' below to go there now.");
+                                self.append_log(t.full_disk_access_header);
+                                self.append_log(t.full_disk_access_msg);
+                                self.append_log(t.full_disk_access_grant);
+                                self.append_log(t.full_disk_access_path);
+                                self.append_log(t.open_settings); // This is just a label, the button is below
                             }
                         }
                     }
@@ -203,20 +213,31 @@ impl RufusGuiApp {
 
 impl eframe::App for RufusGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let t = self.lang.translations();
         self.poll_worker_messages();
         if self.busy {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("rufus-rs GUI");
-            ui.label("Create Windows bootable USB drives on macOS.");
+            ui.horizontal(|ui| {
+                ui.heading(t.gui_title);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("lang_combo")
+                        .selected_text(self.lang.name())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.lang, Language::English, "English");
+                            ui.selectable_value(&mut self.lang, Language::Italian, "Italiano");
+                        });
+                });
+            });
+            ui.label(t.gui_description);
             ui.separator();
 
             ui.horizontal(|ui| {
-                ui.label("ISO:");
+                ui.label(t.iso_label);
                 ui.text_edit_singleline(&mut self.iso_path);
-                if ui.button("Browse").clicked() {
+                if ui.button(t.browse).clicked() {
                     if let Some(path) = FileDialog::new()
                         .add_filter("Windows ISO", &["iso"])
                         .pick_file()
@@ -231,8 +252,8 @@ impl eframe::App for RufusGuiApp {
                     .selected_disk
                     .as_deref()
                     .map(|disk| format!("/dev/{disk}"))
-                    .unwrap_or_else(|| "Select disk".to_string());
-                egui::ComboBox::from_label("Target disk")
+                    .unwrap_or_else(|| t.target_disk.to_string());
+                egui::ComboBox::from_label(t.target_disk)
                     .selected_text(selected_text)
                     .show_ui(ui, |ui| {
                         for disk in &self.disks {
@@ -252,7 +273,7 @@ impl eframe::App for RufusGuiApp {
                         }
                     });
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Refresh disks"))
+                    .add_enabled(!self.busy, egui::Button::new(t.refresh_disks))
                     .clicked()
                 {
                     self.refresh_disks();
@@ -263,26 +284,30 @@ impl eframe::App for RufusGuiApp {
                 if disk.internal {
                     ui.colored_label(
                         Color32::RED,
-                        "Selected disk is internal: execution will be blocked.",
+                        t.selected_internal_error,
                     );
                 }
             }
 
             ui.horizontal(|ui| {
-                ui.label("Volume label:");
+                ui.label(t.volume_label);
                 ui.text_edit_singleline(&mut self.label);
 
-                ui.label("Filesystem:");
+                ui.label(t.filesystem);
                 egui::ComboBox::from_id_salt("fs_combo")
-                    .selected_text(self.fs.to_string())
+                    .selected_text(match self.fs {
+                        FileSystem::Fat32 => t.fat32_label,
+                        FileSystem::ExFat => t.exfat_label,
+                        FileSystem::Ntfs => t.ntfs_label,
+                    })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.fs, FileSystem::Fat32, "FAT32 (Standard)");
-                        ui.selectable_value(&mut self.fs, FileSystem::ExFat, "ExFAT (Linux/Compatibility)");
-                        ui.selectable_value(&mut self.fs, FileSystem::Ntfs, "NTFS (Windows Only)");
+                        ui.selectable_value(&mut self.fs, FileSystem::Fat32, t.fat32_label);
+                        ui.selectable_value(&mut self.fs, FileSystem::ExFat, t.exfat_label);
+                        ui.selectable_value(&mut self.fs, FileSystem::Ntfs, t.ntfs_label);
                     });
 
                 if self.fs == FileSystem::Fat32 {
-                    ui.label("Max split size MB:");
+                    ui.label(t.max_split_size);
                     ui.text_edit_singleline(&mut self.max_split_size_mb);
                 }
             });
@@ -290,13 +315,13 @@ impl eframe::App for RufusGuiApp {
             ui.add_space(4.0);
             match self.fs {
                 FileSystem::Fat32 => {
-                    ui.label("FAT32: High compatibility (UEFI), but requires WIM splitting for large files.");
+                    ui.label(t.fat32_info);
                 }
                 FileSystem::ExFat => {
-                    ui.label("ExFAT: Recommended for Linux compatibility and large files (>4GB).");
+                    ui.label(t.exfat_info);
                 }
                 FileSystem::Ntfs => {
-                    ui.label("NTFS: Windows only. Now supported natively with built-in drivers.");
+                    ui.label(t.ntfs_info);
                 }
             }
 
@@ -304,19 +329,19 @@ impl eframe::App for RufusGuiApp {
 
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Dry-run"))
+                    .add_enabled(!self.busy, egui::Button::new(t.dry_run))
                     .clicked()
                 {
                     self.start_job(false);
                 }
                 ui.checkbox(
                     &mut self.acknowledge_erase,
-                    "I understand the target disk will be erased",
+                    t.acknowledge_erase,
                 );
                 if ui
                     .add_enabled(
                         !self.busy && self.acknowledge_erase,
-                        egui::Button::new("Create USB"),
+                        egui::Button::new(t.create_usb),
                     )
                     .clicked()
                 {
@@ -329,22 +354,22 @@ impl eframe::App for RufusGuiApp {
                 ui.add(egui::ProgressBar::new(self.progress).show_percentage());
             }
 
-            if self.output_log.contains("FULL DISK ACCESS") {
+            if self.output_log.contains("FULL DISK ACCESS") || self.output_log.contains("ACCESSO COMPLETO AL DISCO") {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.visuals_mut().override_text_color = Some(Color32::from_rgb(255, 165, 0));
-                    if ui.button("⚙ Open System Settings (Privacy)").clicked() {
+                    if ui.button(t.open_settings).clicked() {
                         let _ = Command::new("open")
                             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
                             .spawn();
                     }
-                    ui.label("After granting access, you MUST restart the app.");
+                    ui.label(t.restart_required);
                 });
                 ui.add_space(8.0);
             }
 
             ui.separator();
-            ui.label("Log");
+            ui.label(t.log_label);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut self.output_log)
@@ -361,10 +386,8 @@ fn run_create_usb_job(
     execute: bool,
     sender: &Sender<JobMessage>,
 ) -> Result<()> {
-    let _ = sender.send(JobMessage::Log(format!(
-        "Inspecting target disk /dev/{}",
-        options.disk_identifier
-    )));
+    let t = options.lang.translations();
+    let _ = sender.send(JobMessage::Log(t.inspecting_disk.replace("{}", &options.disk_identifier)));
     let target_disk = disk::find_disk(&options.disk_identifier)
         .with_context(|| format!("Target disk not found: {}", options.disk_identifier))?;
     if target_disk.internal {
@@ -374,10 +397,7 @@ fn run_create_usb_job(
         );
     }
 
-    let _ = sender.send(JobMessage::Log(format!(
-        "Inspecting ISO: {}",
-        options.iso_path.display()
-    )));
+    let _ = sender.send(JobMessage::Log(t.inspecting_iso.replace("{}", &options.iso_path.display().to_string())));
     let inspection = iso::inspect_iso(&options.iso_path, options.max_split_size_mb)
         .context("Could not inspect ISO content")?;
     let plan = pipeline::build_plan(&options, &target_disk, &inspection);
@@ -390,7 +410,7 @@ fn run_create_usb_job(
     }
 
     let _ = sender.send(JobMessage::Log(
-        "Executing disk partition + file copy pipeline...".to_string(),
+        t.executing_pipeline.to_string(),
     ));
     pipeline::execute_create_usb(&options, &inspection, |p| {
         let _ = sender.send(JobMessage::Progress(p));

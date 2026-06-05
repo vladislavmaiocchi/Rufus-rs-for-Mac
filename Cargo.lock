@@ -2969,6 +2969,7 @@ dependencies = [
  "eframe",
  "plist",
  "rfd",
+ "serde",
  "tempfile",
  "walkdir",
  "wimlib",

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rufus_rs::disk::{self, DiskInfo};
+use rufus_rs::i18n::Language;
 use rufus_rs::pipeline::{self, CreateUsbOptions, CreateUsbPlan, FileSystem};
 use rufus_rs::{iso, validation};
 
@@ -16,6 +17,9 @@ use rufus_rs::{iso, validation};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Language to use (en, it)
+    #[arg(long, default_value = "en", global = true)]
+    lang: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -34,7 +38,7 @@ struct CreateUsbArgs {
     /// Target whole disk identifier (example: disk4 or /dev/disk4)
     #[arg(long)]
     disk: String,
-    /// Filesystem to use (fat32 or exfat)
+    /// Filesystem to use (fat32, exfat or ntfs)
     #[arg(long, default_value = "fat32")]
     fs: String,
     /// FAT32 volume label (max 11 chars, A-Z, 0-9 or underscore)
@@ -53,22 +57,32 @@ struct CreateUsbArgs {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let lang = match cli.lang.to_lowercase().as_str() {
+        "it" => Language::Italian,
+        _ => Language::English,
+    };
+
     match cli.command {
-        Commands::ListDisks => list_disks_command(),
-        Commands::CreateUsb(args) => create_usb_command(args),
+        Commands::ListDisks => list_disks_command(lang),
+        Commands::CreateUsb(args) => create_usb_command(args, lang),
     }
 }
 
-fn list_disks_command() -> Result<()> {
+fn list_disks_command(lang: Language) -> Result<()> {
     let disks = disk::list_disks().context("Unable to query disk list with diskutil")?;
-    print_disks(&disks);
+    print_disks(&disks, lang);
     Ok(())
 }
 
-fn print_disks(disks: &[DiskInfo]) {
+fn print_disks(disks: &[DiskInfo], lang: Language) {
+    let t = lang.translations();
     println!(
         "{:<14} {:<8} {:<9} {:<11} {}",
-        "disk", "internal", "removable", "size", "model"
+        t.cli_list_header_disk,
+        t.cli_list_header_internal,
+        t.cli_list_header_removable,
+        t.cli_list_header_size,
+        t.cli_list_header_model
     );
     for disk in disks {
         println!(
@@ -81,10 +95,11 @@ fn print_disks(disks: &[DiskInfo]) {
         );
     }
     println!();
-    println!("Only use disks with internal=no for USB creation.");
+    println!("{}", t.cli_internal_warning);
 }
 
-fn create_usb_command(args: CreateUsbArgs) -> Result<()> {
+fn create_usb_command(args: CreateUsbArgs, lang: Language) -> Result<()> {
+    let t = lang.translations();
     let iso_path = args
         .iso
         .canonicalize()
@@ -114,16 +129,17 @@ fn create_usb_command(args: CreateUsbArgs) -> Result<()> {
         label,
         fs,
         max_split_size_mb: args.max_split_size_mb,
+        lang,
     };
 
     let inspection = iso::inspect_iso(&options.iso_path, options.max_split_size_mb)
         .context("Could not inspect ISO content")?;
     let plan = pipeline::build_plan(&options, &target_disk, &inspection);
-    print_plan(&plan);
+    print_plan(&plan, lang);
 
     if !args.execute {
-        println!("Dry-run only: no disk was modified.");
-        println!("Re-run with --execute --yes-erase-disk to actually create the USB.");
+        println!("{}", t.cli_dry_run_only);
+        println!("{}", t.cli_rerun_instruction);
         return Ok(());
     }
     if !args.yes_erase_disk {
@@ -131,7 +147,7 @@ fn create_usb_command(args: CreateUsbArgs) -> Result<()> {
     }
 
     pipeline::execute_create_usb(&options, &inspection, |p| {
-        print!("\rProgress: {:.1}%", p * 100.0);
+        print!("\r{}", t.cli_progress.replace("{:.1}%", &format!("{:.1}%", p * 100.0)));
         use std::io::{stdout, Write};
         let _ = stdout().flush();
     })?;
@@ -139,8 +155,9 @@ fn create_usb_command(args: CreateUsbArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_plan(plan: &CreateUsbPlan) {
-    println!("Planned actions:");
+fn print_plan(plan: &CreateUsbPlan, lang: Language) {
+    let t = lang.translations();
+    println!("{}", t.cli_planned_actions);
     for (index, step) in plan.steps.iter().enumerate() {
         println!("  {}. {}", index + 1, step);
     }

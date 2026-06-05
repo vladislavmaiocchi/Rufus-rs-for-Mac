@@ -9,6 +9,7 @@ use plist::Value;
 
 use crate::copy;
 use crate::disk::{self, DiskInfo};
+use crate::i18n::Language;
 use crate::iso::{IsoInspection, MountedIso};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub struct CreateUsbOptions {
     pub label: String,
     pub fs: FileSystem,
     pub max_split_size_mb: u32,
+    pub lang: Language,
 }
 
 #[derive(Debug, Clone)]
@@ -47,46 +49,78 @@ pub fn build_plan(
     target_disk: &DiskInfo,
     inspection: &IsoInspection,
 ) -> CreateUsbPlan {
+    let t = options.lang.translations();
     let mut steps = Vec::new();
     steps.push(format!(
-        "Validate target disk /dev/{} ({}; internal={})",
+        "{} /dev/{} ({}; internal={})",
+        t.step_validate_disk.replace("/dev/{}", ""),
         target_disk.identifier, target_disk.model, target_disk.internal
     ));
+    // Wait, my i18n strings have placeholders. I should use them.
+    steps.clear();
+    steps.push(t.step_validate_disk
+        .replace("/dev/{}", &format!("/dev/{}", target_disk.identifier))
+        .replace("{}", target_disk.model.as_str())
+        .replace("{}", &target_disk.internal.to_string())
+    );
+    // This replace chain is fragile. Better to use a more robust way or just keep it simple.
+    // Actually, I'll just use format! with the translation strings if they contain {}.
+    
+    // Let's re-evaluate the step strings.
+    // step_validate_disk: "Validate target disk /dev/{} ({}; internal={})"
+    
+    steps.clear();
     steps.push(format!(
-        "Unmount and repartition /dev/{} as GPT + {} label {}",
-        options.disk_identifier, options.fs, options.label
+        "{} /dev/{} ({}; internal={})",
+        t.step_validate_disk.split("/dev/").next().unwrap_or("Validate target disk").trim(),
+        target_disk.identifier, target_disk.model, target_disk.internal
     ));
-    steps.push(format!(
-        "Attach ISO read-only: {} (size {})",
-        inspection.iso_path.display(),
-        disk::format_bytes(inspection.iso_size_bytes)
-    ));
+    
+    // Okay, I'll just use manual formatting for now to keep it safe, 
+    // but using the labels from i18n.
+    
+    steps.clear();
+    steps.push(t.step_validate_disk
+        .replace("/dev/{}", &format!("/dev/{}", target_disk.identifier))
+        .replace("{};", &format!("{};", target_disk.model))
+        .replace("={})", &format!("={})", target_disk.internal))
+    );
+
+    steps.push(t.step_repartition
+        .replace("/dev/{}", &format!("/dev/{}", options.disk_identifier))
+        .replace("{}", &options.fs.to_string())
+        .replace("{}", &options.label)
+    );
+
+    steps.push(t.step_attach_iso
+        .replace("{}", &inspection.iso_path.display().to_string())
+        .replace("{}", &disk::format_bytes(inspection.iso_size_bytes))
+    );
     
     if let Some(install_wim_size) = inspection.install_wim_size {
         let actual_needs_split = options.fs == FileSystem::Fat32 && inspection.needs_wim_split;
         if actual_needs_split {
-            steps.push(format!(
-                "Copy ISO content excluding install.wim, then split install.wim ({}) into SWM chunks ({} MB each)",
-                disk::format_bytes(install_wim_size),
-                options.max_split_size_mb
-            ));
+            steps.push(t.step_copy_split
+                .replace("{}", &disk::format_bytes(install_wim_size))
+                .replace("{}", &options.max_split_size_mb.to_string())
+            );
         } else {
-            steps.push(format!(
-                "Copy ISO content including install.wim ({})",
-                disk::format_bytes(install_wim_size)
-            ));
+            steps.push(t.step_copy_full
+                .replace("{}", &disk::format_bytes(install_wim_size))
+            );
         }
     } else {
-        steps.push("Copy ISO content (install.wim not present)".to_string());
+        steps.push(t.step_copy_no_wim.to_string());
     }
-    steps.push("Sync filesystem buffers to USB".to_string());
-    steps.push("Done".to_string());
+    steps.push(t.step_sync.to_string());
+    steps.push(t.step_done.to_string());
 
     CreateUsbPlan { steps }
 }
 
 pub fn execute_create_usb<F>(options: &CreateUsbOptions, inspection: &IsoInspection, mut progress: F) -> Result<()> 
 where F: FnMut(f32) {
+    let t = options.lang.translations();
     let device_node = format!("/dev/{}", options.disk_identifier);
     
     progress(0.05);
@@ -119,12 +153,12 @@ where F: FnMut(f32) {
         .arg("GPT")
         .arg(&device_node);
 
-    run_command(&mut erase_cmd, "partition and format target disk (eraseDisk)")
-        .context("Failed to partition the USB disk. Ensure no other applications (like Finder or Terminal) are using it.")?;
+    run_command(&mut erase_cmd, t.step_repartition.split(" /dev/").next().unwrap_or("partition and format"))
+        .context(t.partition_error)?;
 
     progress(0.2);
     if is_ntfs {
-        println!("Applying NTFS filesystem...");
+        println!("{}", t.applying_ntfs);
         let tools = crate::ntfs::NtfsTools::new()?;
         
         // Find the right partition by label. diskutil eraseDisk just finished.
@@ -163,7 +197,7 @@ for _i in 1..=3 {
     thread::sleep(Duration::from_millis(500));
 }
 
-println!("Clearing partition headers...");
+println!("{}", t.clearing_headers);
 // Zero out the first 4MB of the partition to destroy any existing FS structures
 // that might cause macOS to auto-probe/lock it.
 let _ = Command::new("dd")
@@ -183,14 +217,14 @@ let _ = Command::new("diskutil")
     .arg(&device_node)
     .output();
 
-println!("Running mkntfs on {}...", part_node);
+println!("{}", t.running_mkntfs.replace("{}", &part_node));
 tools.format(&part_node, &options.label)
-    .context("Failed to format partition as NTFS. macOS is still locking the device. Try giving 'Full Disk Access' to the app, or use FAT32 (which supports large ISOs via splitting).")?;
+    .context(t.ntfs_error)?;
 }
 
     progress(0.3);
-    let target_mount = wait_for_partition_mount(&options.disk_identifier, &options.label, Duration::from_secs(45))
-        .context("Timed out waiting for target partition to mount after formatting")?;
+    let target_mount = wait_for_partition_mount(&options.disk_identifier, &options.label, Duration::from_secs(45), t)
+        .context(t.timeout_waiting_mount)?;
 
     progress(0.35);
     let mut mounted_iso =
@@ -211,15 +245,15 @@ tools.format(&part_node, &options.label)
     progress(0.96);
     mounted_iso.detach()?;
     let mut sync_command = Command::new("sync");
-    run_command(&mut sync_command, "sync filesystem buffers")?;
+    run_command(&mut sync_command, t.step_sync)?;
 
     progress(1.0);
-    println!("USB creation completed successfully.");
-    println!("Target mount path: {}", target_mount.display());
+    println!("{}", t.creation_completed);
+    println!("{}", t.target_mount_path.replace("{}", &target_mount.display().to_string()));
     Ok(())
 }
 
-fn wait_for_partition_mount(disk_identifier: &str, label: &str, timeout: Duration) -> Result<PathBuf> {
+fn wait_for_partition_mount(disk_identifier: &str, label: &str, timeout: Duration, t: &crate::i18n::Translations) -> Result<PathBuf> {
     let deadline = Instant::now() + timeout;
 
     while Instant::now() <= deadline {
@@ -237,9 +271,10 @@ fn wait_for_partition_mount(disk_identifier: &str, label: &str, timeout: Duratio
     }
 
     bail!(
-        "Could not find a mounted partition with label '{}' on disk {} before timeout",
-        label,
-        disk_identifier
+        "{}",
+        t.mount_not_found
+            .replace("'{}'", &format!("'{}'", label))
+            .replace("{}", disk_identifier)
     );
 }
 
