@@ -80,7 +80,7 @@ impl RufusGuiApp {
         }
     }
 
-    fn start_job(&mut self, execute: bool) {
+    fn start_job(&mut self, execute: bool, format_only: bool) {
         if self.busy {
             return;
         }
@@ -92,20 +92,23 @@ impl RufusGuiApp {
             return;
         };
 
-        let iso_input = self.iso_path.trim();
-        if iso_input.is_empty() {
-            self.append_log(t.select_iso_error);
-            return;
-        }
-
-        let iso_path = PathBuf::from(iso_input);
-        let iso_path = match iso_path.canonicalize() {
-            Ok(path) => path,
-            Err(_) => {
-                self.append_log(format!("ISO not found: {}", iso_path.display()));
+        let mut iso_path = None;
+        if !format_only {
+            let iso_input = self.iso_path.trim();
+            if iso_input.is_empty() {
+                self.append_log(t.select_iso_error);
                 return;
             }
-        };
+
+            let path = PathBuf::from(iso_input);
+            match path.canonicalize() {
+                Ok(path) => iso_path = Some(path),
+                Err(_) => {
+                    self.append_log(format!("ISO not found: {}", path.display()));
+                    return;
+                }
+            };
+        }
 
         let max_split_size_mb = match self.max_split_size_mb.trim().parse::<u32>() {
             Ok(value) if value >= 512 => value,
@@ -141,18 +144,25 @@ impl RufusGuiApp {
         self.receiver = Some(receiver);
         self.busy = true;
         self.progress = 0.0;
-        self.append_log(if execute {
-            t.start_usb_creation
+        
+        if format_only {
+            self.append_log(t.start_format_only);
         } else {
-            t.start_dry_run
-        });
+            self.append_log(if execute {
+                t.start_usb_creation
+            } else {
+                t.start_dry_run
+            });
+        }
 
         let lang_for_thread = self.lang;
         thread::spawn(move || {
             let t = lang_for_thread.translations();
-            let result = run_create_usb_job(options, execute, &sender);
+            let result = run_create_usb_job(options, execute, format_only, &sender);
             let completion = result.map(|_| {
-                if execute {
+                if format_only {
+                    t.success_format.to_string()
+                } else if execute {
                     t.success_usb.to_string()
                 } else {
                     t.success_dry_run.to_string()
@@ -191,7 +201,7 @@ impl RufusGuiApp {
                                 self.append_log(t.full_disk_access_msg);
                                 self.append_log(t.full_disk_access_grant);
                                 self.append_log(t.full_disk_access_path);
-                                self.append_log(t.open_settings); // This is just a label, the button is below
+                                self.append_log(t.open_settings);
                             }
                         }
                     }
@@ -282,10 +292,7 @@ impl eframe::App for RufusGuiApp {
 
             if let Some(disk) = self.selected_disk_info() {
                 if disk.internal {
-                    ui.colored_label(
-                        Color32::RED,
-                        t.selected_internal_error,
-                    );
+                    ui.colored_label(Color32::RED, t.selected_internal_error);
                 }
             }
 
@@ -314,38 +321,30 @@ impl eframe::App for RufusGuiApp {
 
             ui.add_space(4.0);
             match self.fs {
-                FileSystem::Fat32 => {
-                    ui.label(t.fat32_info);
-                }
-                FileSystem::ExFat => {
-                    ui.label(t.exfat_info);
-                }
-                FileSystem::Ntfs => {
-                    ui.label(t.ntfs_info);
-                }
-            }
+                FileSystem::Fat32 => ui.label(t.fat32_info),
+                FileSystem::ExFat => ui.label(t.exfat_info),
+                FileSystem::Ntfs => ui.label(t.ntfs_info),
+            };
 
             ui.separator();
 
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new(t.dry_run))
-                    .clicked()
-                {
-                    self.start_job(false);
+                if ui.add_enabled(!self.busy, egui::Button::new(t.dry_run)).clicked() {
+                    self.start_job(false, false);
                 }
-                ui.checkbox(
-                    &mut self.acknowledge_erase,
-                    t.acknowledge_erase,
-                );
+                ui.checkbox(&mut self.acknowledge_erase, t.acknowledge_erase);
                 if ui
-                    .add_enabled(
-                        !self.busy && self.acknowledge_erase,
-                        egui::Button::new(t.create_usb),
-                    )
+                    .add_enabled(!self.busy && self.acknowledge_erase, egui::Button::new(t.create_usb))
                     .clicked()
                 {
-                    self.start_job(true);
+                    self.start_job(true, false);
+                }
+                ui.add_space(10.0);
+                if ui
+                    .add_enabled(!self.busy && self.acknowledge_erase, egui::Button::new(t.format_only))
+                    .clicked()
+                {
+                    self.start_job(true, true);
                 }
             });
 
@@ -371,11 +370,7 @@ impl eframe::App for RufusGuiApp {
             ui.separator();
             ui.label(t.log_label);
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.output_log)
-                        .desired_rows(20)
-                        .interactive(true) // Allow selection/copying
-                );
+                ui.add(egui::TextEdit::multiline(&mut self.output_log).desired_rows(20).interactive(true));
             });
         });
     }
@@ -384,6 +379,7 @@ impl eframe::App for RufusGuiApp {
 fn run_create_usb_job(
     options: CreateUsbOptions,
     execute: bool,
+    format_only: bool,
     sender: &Sender<JobMessage>,
 ) -> Result<()> {
     let t = options.lang.translations();
@@ -391,16 +387,18 @@ fn run_create_usb_job(
     let target_disk = disk::find_disk(&options.disk_identifier)
         .with_context(|| format!("Target disk not found: {}", options.disk_identifier))?;
     if target_disk.internal {
-        bail!(
-            "Refusing to use /dev/{} because it is an internal disk",
-            target_disk.identifier
-        );
+        bail!("Refusing to use /dev/{} because it is an internal disk", target_disk.identifier);
     }
 
-    let _ = sender.send(JobMessage::Log(t.inspecting_iso.replace("{}", &options.iso_path.display().to_string())));
-    let inspection = iso::inspect_iso(&options.iso_path, options.max_split_size_mb)
-        .context("Could not inspect ISO content")?;
-    let plan = pipeline::build_plan(&options, &target_disk, &inspection);
+    let mut inspection = None;
+    if !format_only {
+        if let Some(iso_path) = &options.iso_path {
+            let _ = sender.send(JobMessage::Log(t.inspecting_iso.replace("{}", &iso_path.display().to_string())));
+            inspection = Some(iso::inspect_iso(iso_path, options.max_split_size_mb).context("Could not inspect ISO content")?);
+        }
+    }
+
+    let plan = pipeline::build_plan(&options, &target_disk, inspection.as_ref());
     for (index, step) in plan.steps.iter().enumerate() {
         let _ = sender.send(JobMessage::Log(format!("{}. {}", index + 1, step)));
     }
@@ -409,10 +407,8 @@ fn run_create_usb_job(
         return Ok(());
     }
 
-    let _ = sender.send(JobMessage::Log(
-        t.executing_pipeline.to_string(),
-    ));
-    pipeline::execute_create_usb(&options, &inspection, |p| {
+    let _ = sender.send(JobMessage::Log(t.executing_pipeline.to_string()));
+    pipeline::execute_create_usb(&options, inspection.as_ref(), |p| {
         let _ = sender.send(JobMessage::Progress(p));
     })
 }

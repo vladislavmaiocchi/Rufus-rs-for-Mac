@@ -124,7 +124,7 @@ fn create_usb_command(args: CreateUsbArgs, lang: Language) -> Result<()> {
     }
 
     let options = CreateUsbOptions {
-        iso_path,
+        iso_path: Some(iso_path),
         disk_identifier,
         label,
         fs,
@@ -132,9 +132,9 @@ fn create_usb_command(args: CreateUsbArgs, lang: Language) -> Result<()> {
         lang,
     };
 
-    let inspection = iso::inspect_iso(&options.iso_path, options.max_split_size_mb)
+    let inspection = iso::inspect_iso(options.iso_path.as_ref().unwrap(), options.max_split_size_mb)
         .context("Could not inspect ISO content")?;
-    let plan = pipeline::build_plan(&options, &target_disk, &inspection);
+    let plan = pipeline::build_plan(&options, &target_disk, Some(&inspection));
     print_plan(&plan, lang);
 
     if !args.execute {
@@ -146,7 +146,7 @@ fn create_usb_command(args: CreateUsbArgs, lang: Language) -> Result<()> {
         bail!("Missing --yes-erase-disk flag");
     }
 
-    pipeline::execute_create_usb(&options, &inspection, |p| {
+    pipeline::execute_create_usb(&options, Some(&inspection), |p| {
         print!("\r{}", t.cli_progress.replace("{:.1}%", &format!("{:.1}%", p * 100.0)));
         use std::io::{stdout, Write};
         let _ = stdout().flush();
