@@ -29,14 +29,11 @@ impl NtfsTools {
     }
 
     pub fn format(&self, device: &str, label: &str) -> Result<()> {
-        let mut cmd = Command::new(&self.mkntfs_path);
-        cmd.arg("-Q") // Quick format
-           .arg("-L")
-           .arg(label)
-           .arg("-F") // Force (needed for some devices)
-           .arg(device);
+        let shell_cmd = format!("'{}' -Q -L '{}' -F '{}'", self.mkntfs_path.display(), label, device);
+        let mut cmd = Command::new("osascript");
+        cmd.arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd));
            
-        let output = cmd.output().context("Failed to execute mkntfs")?;
+        let output = cmd.output().context("Failed to execute mkntfs via osascript")?;
         
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

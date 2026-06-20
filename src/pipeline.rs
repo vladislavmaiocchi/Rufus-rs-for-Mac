@@ -114,10 +114,10 @@ where F: FnMut(f32) {
     progress(0.05);
     for i in 1..=3 {
         log_fn(&format!("Attempting to unmount disk {} (attempt {})", device_node, i));
-        let output = Command::new("diskutil")
-            .arg("unmountDisk")
-            .arg("force")
-            .arg(&device_node)
+        let shell_cmd = format!("diskutil unmountDisk force \"{}\"", device_node);
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd))
             .output();
         
         match output {
@@ -137,17 +137,9 @@ where F: FnMut(f32) {
     };
 
     log_fn(&format!("Partitioning disk {} with GPT and {} (label: {})", device_node, fs_str, options.label));
-    let mut partition_cmd = Command::new("diskutil");
-    partition_cmd
-        .arg("partitionDisk")
-        .arg(&device_node)
-        .arg("GPT")
-        .arg("FAT32")
-        .arg("EFI")
-        .arg("200M")
-        .arg(fs_str)
-        .arg(&options.label)
-        .arg("Remainder");
+    let shell_cmd = format!("diskutil partitionDisk {} GPT FAT32 EFI 200M {} {} Remainder", device_node, fs_str, options.label);
+    let mut partition_cmd = Command::new("osascript");
+    partition_cmd.arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd));
 
     run_command(&mut partition_cmd, t.step_repartition.split(" /dev/").next().unwrap_or("partitioning"), &log_path)
         .context(t.partition_error)?;
@@ -183,16 +175,16 @@ where F: FnMut(f32) {
         let part_node = format!("/dev/r{}", part_id);
         for _i in 1..=3 {
             log_fn(&format!("Attempting forced unmount of {} for NTFS format (attempt {})", part_node, _i));
-            let _ = Command::new("diskutil").arg("unmountDisk").arg("force").arg(&device_node).output();
+            let shell_cmd = format!("diskutil unmountDisk force '{}'", device_node);
+            let _ = Command::new("osascript").arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd)).output();
             thread::sleep(Duration::from_millis(500));
         }
 
         log_fn(&format!("Zeroing out first 4MB of {} to clear partition headers...", part_node));
-        let zero_out = Command::new("dd")
-            .arg("if=/dev/zero")
-            .arg(format!("of={}", part_node))
-            .arg("bs=1m")
-            .arg("count=4")
+        let shell_cmd = format!("dd if=/dev/zero of={} bs=1m count=4", part_node);
+        let zero_out = Command::new("osascript")
+            .arg("-e")
+            .arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd))
             .output();
         
         match zero_out {
@@ -202,7 +194,8 @@ where F: FnMut(f32) {
         }
         
         thread::sleep(Duration::from_secs(2));
-        let _ = Command::new("diskutil").arg("unmountDisk").arg("force").arg(&device_node).output();
+        let shell_cmd = format!("diskutil unmountDisk force '{}'", device_node);
+        let _ = Command::new("osascript").arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd)).output();
 
         log_fn(&format!("Starting NTFS format on {} with label {}", part_node, options.label));
         tools.format(&part_node, &options.label).context(t.ntfs_error)?;
