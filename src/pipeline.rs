@@ -1,6 +1,7 @@
-use std::io::Cursor;
-use std::path::PathBuf;
+use std::io::{self, Cursor, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::fs::{self, OpenOptions};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -97,14 +98,33 @@ pub fn execute_create_usb<F>(options: &CreateUsbOptions, inspection: Option<&Iso
 where F: FnMut(f32) {
     let t = options.lang.translations();
     let device_node = format!("/dev/{}", options.disk_identifier);
-    
+    let log_path = PathBuf::from("rufus-rs-log.txt");
+
+    // Initialize log file
+    let _ = fs::write(&log_path, format!("--- Rufus-rs Log Started at {:?} ---
+", Instant::now()));
+    let log_fn = |msg: &str| {
+        let _ = OpenOptions::new().append(true).open(&log_path)
+            .map(|mut f| writeln!(f, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg));
+    };
+
+    log_fn(&format!("Starting USB creation for disk: {}", device_node));
+    log_fn(&format!("Options: {:?}", options));
+
     progress(0.05);
     for i in 1..=3 {
-        let _ = Command::new("diskutil")
+        log_fn(&format!("Attempting to unmount disk {} (attempt {})", device_node, i));
+        let output = Command::new("diskutil")
             .arg("unmountDisk")
             .arg("force")
             .arg(&device_node)
             .output();
+        
+        match output {
+            Ok(out) if out.status.success() => log_fn(&format!("Successfully unmounted {} (attempt {})", device_node, i)),
+            Ok(out) => log_fn(&format!("Unmount attempt {} failed: {}", i, String::from_utf8_lossy(&out.stderr))),
+            Err(e) => log_fn(&format!("Unmount attempt {} error: {}", i, e)),
+        }
         thread::sleep(Duration::from_millis(500));
         if i == 3 { break; }
     }
@@ -116,21 +136,36 @@ where F: FnMut(f32) {
         FileSystem::Ntfs => ("MS-DOS", true),
     };
 
-    let mut erase_cmd = Command::new("diskutil");
-    erase_cmd
-        .arg("eraseDisk")
+    log_fn(&format!("Partitioning disk {} with GPT and {} (label: {})", device_node, fs_str, options.label));
+    let mut partition_cmd = Command::new("diskutil");
+    partition_cmd
+        .arg("partitionDisk")
+        .arg(&device_node)
+        .arg("GPT")
+        .arg("FAT32")
+        .arg("EFI")
+        .arg("200M")
         .arg(fs_str)
         .arg(&options.label)
-        .arg("GPT")
-        .arg(&device_node);
+        .arg("Remainder");
 
-    run_command(&mut erase_cmd, t.step_repartition.split(" /dev/").next().unwrap_or("partition and format"))
+    run_command(&mut partition_cmd, t.step_repartition.split(" /dev/").next().unwrap_or("partitioning"), &log_path)
         .context(t.partition_error)?;
+
+    // Control Fix: Validate that we have at least two partitions (EFI and Data)
+    log_fn("Validating partition structure...");
+    let partitions = list_disk_partitions(&options.disk_identifier)?;
+    if partitions.len() < 2 {
+        let err_msg = format!("Partitioning failed: Expected at least 2 partitions (EFI and Data), but found {}. Please check if the disk is correctly connected.", partitions.len());
+        log_fn(&format!("[ERROR] {}", err_msg));
+        bail!("{}", err_msg);
+    }
+    log_fn(&format!("Partition validation successful. Found {} partitions.", partitions.len()));
 
     progress(0.2);
     if is_ntfs {
+        log_fn("Formatting partition as NTFS...");
         let tools = crate::ntfs::NtfsTools::new()?;
-        let partitions = list_disk_partitions(&options.disk_identifier)?;
         let mut target_part = None;
         for part_id in &partitions {
             if part_id.ends_with("s1") { continue; }
@@ -147,21 +182,40 @@ where F: FnMut(f32) {
 
         let part_node = format!("/dev/r{}", part_id);
         for _i in 1..=3 {
+            log_fn(&format!("Attempting forced unmount of {} for NTFS format (attempt {})", part_node, _i));
             let _ = Command::new("diskutil").arg("unmountDisk").arg("force").arg(&device_node).output();
             thread::sleep(Duration::from_millis(500));
         }
 
-        let _ = Command::new("dd").arg("if=/dev/zero").arg(format!("of={}", part_node)).arg("bs=1m").arg("count=4").output();
+        log_fn(&format!("Zeroing out first 4MB of {} to clear partition headers...", part_node));
+        let zero_out = Command::new("dd")
+            .arg("if=/dev/zero")
+            .arg(format!("of={}", part_node))
+            .arg("bs=1m")
+            .arg("count=4")
+            .output();
+        
+        match zero_out {
+            Ok(out) if out.status.success() => log_fn("Zeroing out successful."),
+            Ok(out) => log_fn(&format!("Zeroing out failed: {}", String::from_utf8_lossy(&out.stderr))),
+            Err(e) => log_fn(&format!("Zeroing out error: {}", e)),
+        }
+        
         thread::sleep(Duration::from_secs(2));
         let _ = Command::new("diskutil").arg("unmountDisk").arg("force").arg(&device_node).output();
 
+        log_fn(&format!("Starting NTFS format on {} with label {}", part_node, options.label));
         tools.format(&part_node, &options.label).context(t.ntfs_error)?;
+        log_fn("NTFS format completed successfully.");
     }
 
     if let (Some(iso_path), Some(inspection)) = (&options.iso_path, inspection) {
+        log_fn(&format!("Starting file copy phase from {} to {}", iso_path.display(), options.disk_identifier));
         progress(0.3);
-        let target_mount = wait_for_partition_mount(&options.disk_identifier, &options.label, Duration::from_secs(45), t)
+        let target_mount = wait_for_partition_mount(&options.disk_identifier, &options.label, Duration::from_secs(45), &t)
             .context(t.timeout_waiting_mount)?;
+
+        log_fn(&format!("Target partition mounted at: {}", target_mount.display()));
 
         progress(0.35);
         let mut mounted_iso = MountedIso::attach(iso_path).context("Unable to attach ISO for copy phase")?;
@@ -178,14 +232,17 @@ where F: FnMut(f32) {
         )?;
 
         progress(0.96);
+        log_fn("ISO detachment complete.");
         mounted_iso.detach()?;
     } else {
         progress(0.9);
     }
 
+    log_fn("Running final sync...");
     let mut sync_command = Command::new("sync");
-    run_command(&mut sync_command, t.step_sync)?;
+    run_command(&mut sync_command, t.step_sync, &log_path)?;
 
+    log_fn("USB creation process finished successfully.");
     progress(1.0);
     Ok(())
 }
@@ -233,10 +290,31 @@ fn read_partition_info(partition_identifier: &str) -> Result<Option<(Option<Path
     Ok(Some((mount_point, volume_name)))
 }
 
-fn run_command(command: &mut Command, context_label: &str) -> Result<()> {
+fn run_command(command: &mut Command, context_label: &str, log_path: &PathBuf) -> Result<()> {
+    let cmd_str = format!("{:?}", command);
+    
+    let _ = OpenOptions::new().append(true).open(log_path)
+        .map(|mut f| writeln!(f, "[INFO] Executing: {} (Context: {})", cmd_str, context_label));
+
     let output = command.output().with_context(|| format!("Failed to execute command for {context_label}"))?;
+    
     if !output.status.success() {
-        bail!("Command failed during {context_label}: {}\n{}", format!("{command:?}"), String::from_utf8_lossy(&output.stderr));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = OpenOptions::new().append(true).open(log_path)
+            .map(|mut f| writeln!(f, "[ERROR] Command failed: {}
+STDOUT: {}
+STDERR: {}", cmd_str, stdout, stderr));
+        
+        bail!(
+            "Command failed during {context_label}: {}
+{}",
+            format!("{command:?}"),
+            stderr
+        );
+    } else {
+        let _ = OpenOptions::new().append(true).open(log_path)
+            .map(|mut f| writeln!(f, "[SUCCESS] Command completed: {}", cmd_str));
     }
     Ok(())
 }
