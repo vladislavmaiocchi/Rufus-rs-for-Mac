@@ -38,6 +38,12 @@ where F: FnMut(f32) {
 
     for entry in entries {
         let source_path = entry.path();
+        
+        // Skip system metadata directories like __chunk_data created by macOS during mount
+        if source_path.to_string_lossy().contains("__chunk_data") {
+            continue;
+        }
+
         let relative = source_path
             .strip_prefix(source_mount)
             .context("Unable to compute relative path during copy")?;

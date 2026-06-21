@@ -222,32 +222,6 @@ impl RufusGuiApp {
 }
 
 impl eframe::App for RufusGuiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let t = self.lang.translations();
-        self.poll_worker_messages();
-        if self.busy {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Header
-            ui.horizontal(|ui| {
-                ui.heading(t.gui_title);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    egui::ComboBox::from_id_salt("lang_combo")
-                        .selected_text(self.lang.name())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.lang, Language::English, "English");
-                            ui.selectable_value(&mut self.lang, Language::Italian, "Italiano");
-                        });
-                });
-            });
-            ui.add_space(4.0);
-
-            // DRIVE PROPERTIES
-            ui.group(|ui| {
-                ui.label(egui::RichText::new(t.drive_properties).strong());
-                ui.add_space(2.0);
 
                 egui::Grid::new("drive_grid")
                     .num_columns(2)

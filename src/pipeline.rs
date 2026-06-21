@@ -111,24 +111,6 @@ where F: FnMut(f32) {
     log_fn(&format!("Starting USB creation for disk: {}", device_node));
     log_fn(&format!("Options: {:?}", options));
 
-    progress(0.05);
-    for i in 1..=3 {
-        log_fn(&format!("Attempting to unmount disk {} (attempt {})", device_node, i));
-        let shell_cmd = format!("diskutil unmountDisk force \"{}\"", device_node);
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd))
-            .output();
-        
-        match output {
-            Ok(out) if out.status.success() => log_fn(&format!("Successfully unmounted {} (attempt {})", device_node, i)),
-            Ok(out) => log_fn(&format!("Unmount attempt {} failed: {}", i, String::from_utf8_lossy(&out.stderr))),
-            Err(e) => log_fn(&format!("Unmount attempt {} error: {}", i, e)),
-        }
-        thread::sleep(Duration::from_millis(500));
-        if i == 3 { break; }
-    }
-
     progress(0.1);
     let (fs_str, is_ntfs) = match options.fs {
         FileSystem::Fat32 => ("MS-DOS", false),
@@ -137,7 +119,8 @@ where F: FnMut(f32) {
     };
 
     log_fn(&format!("Partitioning disk {} with GPT and {} (label: {})", device_node, fs_str, options.label));
-    let shell_cmd = format!("diskutil partitionDisk {} GPT FAT32 EFI 200M {} {} Remainder", device_node, fs_str, options.label);
+    // Combine unmount and partition into one administrative call to prevent multiple password prompts
+    let shell_cmd = format!("diskutil unmountDisk force {}; diskutil partitionDisk {} GPT FAT32 EFI 200M {} {} 0", device_node, device_node, fs_str, options.label);
     let mut partition_cmd = Command::new("osascript");
     partition_cmd.arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd));
 
@@ -159,46 +142,49 @@ where F: FnMut(f32) {
         log_fn("Formatting partition as NTFS...");
         let tools = crate::ntfs::NtfsTools::new()?;
         let mut target_part = None;
+        let mut fallback_part = None;
+
         for part_id in &partitions {
             if part_id.ends_with("s1") { continue; }
             if let Some((_, part_label)) = read_partition_info(part_id)? {
-                if part_label.to_uppercase() == options.label.to_uppercase() || !part_label.is_empty() {
+                let label_up = part_label.to_uppercase();
+                if label_up == "EFI" { continue; }
+                
+                if label_up == options.label.to_uppercase() {
                     target_part = Some(part_id.clone());
                     break;
                 }
+                if !part_label.is_empty() {
+                    fallback_part = Some(part_id.clone());
+                }
             }
         }
-        let part_id = target_part.or_else(|| partitions.get(1).cloned()).ok_or_else(|| {
+        let part_id = target_part.or(fallback_part).or_else(|| partitions.get(1).cloned()).ok_or_else(|| {
             anyhow::anyhow!("Could not find a suitable partition to format as NTFS.")
         })?;
 
-        let part_node = format!("/dev/r{}", part_id);
-        for _i in 1..=3 {
-            log_fn(&format!("Attempting forced unmount of {} for NTFS format (attempt {})", part_node, _i));
-            let shell_cmd = format!("diskutil unmountDisk force '{}'", device_node);
-            let _ = Command::new("osascript").arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd)).output();
-            thread::sleep(Duration::from_millis(500));
-        }
+        let part_node = format!("/dev/{}", part_id);
+        let part_disk_node = format!("/dev/{}", part_id);
+        log_fn(&format!("Attempting forced unmount and header clearing of {} (3 attempts)", part_node));
+        
+        // Combine 3 attempts of header clearing.
+        // The final unmount and formatting are now handled atomically in ntfs.rs
+        let combined_shell_cmd = format!(
+            "for i in 1 2 3; do diskutil unmountDisk force '{}'; diskutil unmount force '{}'; dd if=/dev/zero of={} bs=1m count=4; sleep 0.5; done",
+            device_node, part_disk_node, part_node
+        );
+        
+        let mut clear_cmd = Command::new("osascript");
+        clear_cmd.arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", combined_shell_cmd));
+        let _ = clear_cmd.output();
 
-        log_fn(&format!("Zeroing out first 4MB of {} to clear partition headers...", part_node));
-        let shell_cmd = format!("dd if=/dev/zero of={} bs=1m count=4", part_node);
-        let zero_out = Command::new("osascript")
-            .arg("-e")
-            .arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd))
-            .output();
+        log_fn(&format!("Header clearing process completed for {} (NTFS mode)", part_node));
         
-        match zero_out {
-            Ok(out) if out.status.success() => log_fn("Zeroing out successful."),
-            Ok(out) => log_fn(&format!("Zeroing out failed: {}", String::from_utf8_lossy(&out.stderr))),
-            Err(e) => log_fn(&format!("Zeroing out error: {}", e)),
-        }
-        
-        thread::sleep(Duration::from_secs(2));
-        let shell_cmd = format!("diskutil unmountDisk force '{}'", device_node);
-        let _ = Command::new("osascript").arg("-e").arg(format!("do shell script \"{}\" with administrator privileges", shell_cmd)).output();
+        // Extra delay to allow the kernel to finalize the unmount and release the lock
+        thread::sleep(Duration::from_secs(3));
 
         log_fn(&format!("Starting NTFS format on {} with label {}", part_node, options.label));
-        tools.format(&part_node, &options.label).context(t.ntfs_error)?;
+        tools.format(&device_node, &part_node, &options.label).context(t.ntfs_error)?;
         log_fn("NTFS format completed successfully.");
     }
 
